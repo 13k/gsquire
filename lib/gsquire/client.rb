@@ -12,50 +12,60 @@ module GSquire
 
     attr_accessor :oauth_token
 
+    # @param [OAuth2::AccessToken] Authorized oauth token
     def initialize(token)
       @oauth_token = token
     end
 
-    # Pulls all task lists for authorized user
-    # @return [Array] Array of task list hashes
+    # Pulls all tasklists for authorized user
+    # @return [Array] Array of tasklist hashes
     def tasklists
       get gtasks_tasklists_url
     end
 
-    # Pulls a task list
-    # @param [String] tasklist_id ('@default') Task list ID
-    # @return [Hash] task list
+    # Pulls a tasklist
+    # @param [String] tasklist_id ('@default') Tasklist id
+    # @return [Hash] tasklist
     def tasklist(tasklist_id = '@default')
       get gtasks_tasklist_url(tasklist_id)
     end
 
+    # Creates a tasklist
+    # @param [Hash] tasklist Tasklist data
     def create_tasklist(tasklist)
       post gtasks_tasklists_url, strip(:tasklist, :create, tasklist)
     end
 
+    # Updates a tasklist
+    # @param [Hash] tasklist Tasklist data
     def update_tasklist(tasklist)
       put gtasks_tasklist_url(tasklist[:id]), strip(:tasklist, :update, tasklist)
     end
 
+    # Deletes a tasklist
+    # @param [String] tasklist_id ('@default') Tasklist id
     def delete_tasklist(tasklist_id)
       delete gtasks_tasklist_url(tasklist_id)
     end
 
-    # Pulls all tasks of a task list
-    # @param [String] tasklist_id ('@default') Task list ID
+    # Pulls all tasks of a tasklist
+    # @param [String] tasklist_id ('@default') Tasklist id
     # @return [Array] Array of task hashes
     def tasks(tasklist_id = '@default')
       get gtasks_tasks_url(tasklist_id)
     end
 
-    # Pulls a task of a task list
+    # Pulls a task of a tasklist
     # @param [String] task_id Task ID
-    # @param [String] tasklist_id ('@default') Task list ID
+    # @param [String] tasklist_id ('@default') Tasklist id
     # @return [Hash] Task hash
     def task(task_id, tasklist_id = '@default')
       get gtasks_task_url(task_id, tasklist_id)
     end
 
+    # Creates a task in the given tasklist
+    # @param [Hash] task Task data
+    # @param [String] tasklist_id ('@default') Tasklist id
     def create_task(task, tasklist_id = '@default')
       post gtasks_tasks_url(tasklist_id), strip(:task, :create, task)
     end
