@@ -25,9 +25,12 @@ module GSquire
 
     # Pulls a tasklist
     # @param [String] tasklist_id ('@default') Tasklist id
+    # @option opts [true|false] :pull_tasks (false) Pulls tasklist with all tasks preloaded in the `'tasks'` key
     # @return [Hash] tasklist
-    def tasklist(tasklist_id = '@default')
-      get gtasks_tasklist_url(tasklist_id)
+    def tasklist(tasklist_id = '@default', opts={})
+      tasklist = get gtasks_tasklist_url(tasklist_id)
+      tasklist['tasks'] = tasks tasklist_id if opts[:pull_tasks]
+      tasklist
     end
 
     # Creates a tasklist
