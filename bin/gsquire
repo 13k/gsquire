@@ -1,0 +1,334 @@
+#!/usr/bin/env ruby
+# encoding: utf-8
+
+require 'thor'
+require 'gsquire'
+
+class App < Thor
+  include Thor::Actions
+
+  EXPORT_FORMATS = %w(json).freeze
+  INPUT_FORMATS = %w(json).freeze
+
+  attr_reader :app
+
+  def initialize(*)
+    super
+    app_opts = { :log => options.debug? ? :debug : nil }
+    app_opts[:path] = ENV['GSQUIRE_PATH'] if ENV['GSQUIRE_PATH']
+    @app = GSquire::Application.new app_opts
+  end
+
+  %w(add list rm default).each do |task|
+    map "account:#{task}" => "account_#{task}"
+  end
+  map "account" => "account_list"
+
+  desc "export ACCOUNTS [options]", "Export task lists and tasks for ACCOUNTS"
+  method_option :format, :aliases => '-f', :type => :string, :default => 'json', :desc => "Output file format (valid: #{EXPORT_FORMATS.map(&:to_s).join(', ')})"
+  method_option :output, :aliases => '-o', :type => :string, :default => "{account}", :desc => "Output file name (use `{account}` to be replaced by account name. Format will be appended as file extension)"
+  def export(*accounts)
+    if not EXPORT_FORMATS.include? options.format
+      say_status "export", "invalid format #{options.format}", :red
+      exit 1
+    end
+
+    if accounts.empty?
+      say_status "export", "need an account name", :red
+      exit 1
+    end
+
+    accounts.each do |account|
+      result = []
+      client = app.accounts[account]
+      begin
+        client.tasklists.each do |tasklist|
+          tasklist[:tasks] = client.tasks tasklist[:id]
+          result << tasklist
+          say_status "tasklist", tasklist['title']
+        end
+      rescue GSquire::Accounts::NotAuthorized
+        authorize account
+        retry
+      rescue GSquire::Accounts::NotFound
+        say_status "export", "account #{account} not found, skipping", :yellow
+        next
+      rescue
+        say_status "export", "error exporting #{account}", :red
+        next
+      end
+
+      output = options.output.gsub /{account}/, account
+      output << ".#{options.format}"
+      
+      case fmt = options.format.to_sym
+      when :json
+        File.open(output, 'w') {|f| f.write JSON.pretty_generate result }
+=begin Yeah, I'm committing commented code, I feel bad.
+      when :dot, :png
+        graph = GraphViz.new 'Tasks', :type => :digraph
+        result.each do |tasklist|
+          list_node = graph.add_nodes tasklist['id'], :label => "#{tasklist['name']} (#{tasklist['id']})"
+          tasklist['tasks'].each do |task|
+            task_node = graph.add_nodes task['id'], :label => "#{task['name']} (#{task['id']})"
+            graph.add_edges task_node, list_node
+          end
+        end
+        graph.output(fmt => output)
+=end
+      end
+
+      task_count = result.inject(0) {|sum, h| sum += h[:tasks].size }
+      say_status "export:#{options.format}",
+        format("%s [%s tasklists, %s tasks]", cyan(output, :bold), blue(result.size.to_s, :bold), magenta(task_count.to_s, :bold))
+    end
+  end
+
+  desc "import ACCOUNT INPUT [options]", "Import task lists and tasks from INPUT file into ACCOUNT"
+  method_option :format, :aliases => '-f', :type => :string, :default => 'json', :desc => "Input file format (valid: #{INPUT_FORMATS.join(', ')})"
+  method_option :pretend, :aliases => '-p', :type => :boolean, :default => false, :desc => "Run but do not make any changes"
+  method_option :debug, :aliases => '-d', :type => :boolean, :default => false, :desc => "Turn on debugging"
+  #method_option :graph, :aliases => '-g', :type => :boolean, :default => false, :desc => "Generates a graph image of both the import and result sets"
+  def import(account, input)
+    if not INPUT_FORMATS.include? options.format
+      say_status "export", "invalid format #{options.format}", :red
+      exit 1
+    end
+
+=begin I'm doing it again, fuck me.
+    if options.graph?
+      begin
+        require 'graphviz'
+      rescue LoadError
+        raise Thor::Error, "'ruby-graphviz' gem is required to generate a graph visualization"
+      end
+
+      graph_src = GraphViz.new 'Import', :type => :digraph
+      graph_dest = GraphViz.new 'Result', :type => :digraph
+    end
+=end
+
+    tasklists = case options.format.to_sym
+      when :json
+        JSON.parse(File.read input)
+      end
+
+    parents, orphans = prepare_tasklists!(tasklists)
+
+    if options.pretend?
+      client = nil
+      tasklist_id_seq = id_seq
+    else
+      begin
+        client = app.accounts[account]
+      rescue GSquire::Accounts::NotAuthorized
+        authorize account
+        retry
+      end
+    end
+
+    total_tasks = 0
+    tasklists.each do |tasklist|
+      task_count = 0
+
+      if options.pretend?
+        new_tasklist = { 'title' => tasklist['title'], 'id' => "tasklist-#{tasklist_id_seq.next}" }
+        task_id_seq = id_seq
+      else
+        new_tasklist = client.create_tasklist(tasklist)
+      end
+
+=begin When you do it twice, you stop caring.
+      if options.graph?
+        graph_src.add_node(tasklist['id'])
+        graph_dest.add_node(new_tasklist['id'])
+      end
+=end
+
+      debug "tasklist:create '#{new_tasklist['title']}' (#{new_tasklist['id']})"
+
+      tasklist['tasks'].each do |task|
+        if orphans.include? task['id']
+          debug "skip: orphaned task #{task['title']} (#{task['id']})"
+          next
+        end
+
+        if task.has_key? 'parent'
+          if parents.fetch(task['parent'], :placeholder) == :placeholder
+            parent = tasklist['tasks'].find {|t| t['id'] == task['parent']}
+            tasks = [task, parent].map {|t| "#{t['id'].rjust(35)} #{t['position'].to_s.rjust(20)}" }.join("\n")
+            debug "skip: child called not yet initialized parent:\n#{tasks}"
+            next
+          end
+
+          debug "parent:rename #{task['parent']} #{parents[task['parent']]}"
+          task['parent'] = parents[task['parent']]
+        end
+
+        task['title'].strip!
+
+        if options.pretend?
+          new_task = task.dup.update 'id' => "task-#{task_id_seq.next}"
+        else
+          new_task = client.create_task(task, new_tasklist['id'])
+        end
+
+        debug "task:create '#{new_task['title']}' (#{new_task['id']}, #{task['id']})#{new_task['parent'] ? " [child of #{new_task['parent']}]" : ""}"
+
+        task_count += 1
+
+        if parents.include? task['id']
+          debug "trying to set parent id #{task['id']} twice" if parents[task['id']] != :placeholder
+          parents[task['id']] = new_task['id']
+        end
+      end
+
+      total_tasks += task_count
+
+      say_status "tasklist",
+        format("%s [%s %s]",
+               blue(tasklist['title'], :bold),
+               magenta(task_count, :bold),
+               pluralize(task_count, "task"))
+    end
+
+    say_status "import:#{options.format}",
+      format("%s [%s %s, %s %s]",
+             cyan(account, :bold),
+             blue(tasklists.size, :bold),
+             pluralize(tasklists.size, "tasklist"),
+             magenta(total_tasks, :bold),
+             pluralize(total_tasks, "task"))
+  end
+
+  desc "account:add NAME", "Adds an account with NAME"
+  def account_add(name)
+    if app.accounts.include? name
+      say_status "skip", "account already exists", :yellow
+      return
+    end
+
+    begin
+      authorize name
+      say_status "account:add", name
+    rescue
+      say_status "account:add", "Something went wrong authorizing this account. Did you wait too much to enter the authorization code provided Google? Please try again", :red
+    end
+  end
+
+  desc 'account:list', 'List accounts (default is marked with `*`)'
+  def account_list
+    accounts = app.accounts.map do |acc|
+      acc == app.accounts.default ? "* #{green(acc)}" : acc
+    end
+    say accounts.join("\n")
+  end
+
+  desc 'account:default [ACCOUNT]', 'If given, set default account to ACCOUNT, otherwise show current default account'
+  def account_default(account = nil)
+    if account
+      begin
+        app.accounts.default = account
+        say_status 'account:default', account
+      rescue GSquire::Accounts::NotFound
+        say_status 'account:default', 'account not found', :red
+      end
+    else
+      say app.accounts.default
+    end
+  end
+
+  desc 'account:rm ACCOUNT', 'Removes ACCOUNT'
+  def account_rm(account)
+    if app.accounts.delete account
+      say_status 'account:rm', account
+    else
+      say_status 'account:rm', 'account not found', :red
+    end
+  end
+
+  protected
+
+  def authorize(name)
+    msg = <<-EOM
+GSquire needs your seal of approval to manage tasks on #{name} account.
+Point your browser to
+
+#{app.accounts.authorize_url}
+
+to get one and bring it here to him!
+
+    EOM
+
+    say msg
+    code = ask "Enter code:"
+
+    app.accounts[name] = code
+  end
+
+  colors = %w(bold clear) +
+    %w(black red green yellow blue magenta cyan white).map do |color|
+        [color, "on_#{color}"]
+    end.flatten
+
+  colors.each do |color|
+    class_eval(<<-EOF, __FILE__, __LINE__ + 1)
+      no_tasks do
+        def #{color}(s, bold = false)
+          paint s, #{color.to_sym.inspect}, bold
+        end
+      end
+    EOF
+  end
+
+  def paint(s, color, bold = false)
+    color_shell.set_color(s, color.to_sym, bold == :bold)
+  end
+
+  def color_shell
+    @color_shell ||= begin
+      shell.is_a?(Thor::Shell::Color) ? shell : \
+        Object.new.instance_eval {|me| def set_color(s, *); s; end; me }
+    end
+  end
+
+  def pluralize(count, singular, plural = nil)
+    (count == 1 || count =~ /^1(\.0+)?$/) ? singular : (plural || "#{singular}s")
+  end
+
+  def debug(msg)
+    say_status "debug", msg, :white if options.debug?
+  end
+
+  # Handle parent-child relationships
+  def prepare_tasklists!(tasklists)
+    parents = {}
+    orphans = []
+    tasklist_ids = tasklists.map {|list| list['id'] }
+    tasklists.each do |tasklist|
+      task_ids = tasklist['tasks'].map {|task| task['id'] }
+      tasklist['tasks'].each do |task|
+        next unless task.has_key? 'parent'
+        if not task_ids.include?(task['parent'])
+          if tasklist_ids.include?(task['parent'])
+            task.delete 'parent'
+          else
+            orphans << task['id']
+          end
+        else
+          parents[task['parent']] ||= :placeholder
+        end
+      end
+
+      tasklist['tasks'].sort_by! {|t| t.include?('parent') ? 1 : 0 }
+    end
+
+    [parents, orphans]
+  end
+
+  def id_seq
+    Enumerator.new {|e| i = -1; loop { e << (i += 1) } }
+  end
+end
+
+App.start
