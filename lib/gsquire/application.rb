@@ -6,7 +6,6 @@ require 'gsquire/accounts'
 require 'gsquire/logging'
 
 module GSquire
-  
   #
   # This is the entry-point class for GSquire. Clients should use it to implement applications that use GSquire.
   #

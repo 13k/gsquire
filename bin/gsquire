@@ -60,22 +60,10 @@ class App < Thor
 
       output = options.output.gsub /{account}/, account
       output << ".#{options.format}"
-      
+
       case fmt = options.format.to_sym
       when :json
         File.open(output, 'w') {|f| f.write JSON.pretty_generate result }
-=begin Yeah, I'm committing commented code, I feel bad.
-      when :dot, :png
-        graph = GraphViz.new 'Tasks', :type => :digraph
-        result.each do |tasklist|
-          list_node = graph.add_nodes tasklist['id'], :label => "#{tasklist['name']} (#{tasklist['id']})"
-          tasklist['tasks'].each do |task|
-            task_node = graph.add_nodes task['id'], :label => "#{task['name']} (#{task['id']})"
-            graph.add_edges task_node, list_node
-          end
-        end
-        graph.output(fmt => output)
-=end
       end
 
       task_count = result.inject(0) {|sum, h| sum += h[:tasks].size }
@@ -88,32 +76,18 @@ class App < Thor
   method_option :format, :aliases => '-f', :type => :string, :default => 'json', :desc => "Input file format (valid: #{INPUT_FORMATS.join(', ')})"
   method_option :pretend, :aliases => '-p', :type => :boolean, :default => false, :desc => "Run but do not make any changes"
   method_option :debug, :aliases => '-d', :type => :boolean, :default => false, :desc => "Turn on debugging"
-  #method_option :graph, :aliases => '-g', :type => :boolean, :default => false, :desc => "Generates a graph image of both the import and result sets"
   def import(account, input)
     if not INPUT_FORMATS.include? options.format
       say_status "export", "invalid format #{options.format}", :red
       exit 1
     end
 
-=begin I'm doing it again, fuck me.
-    if options.graph?
-      begin
-        require 'graphviz'
-      rescue LoadError
-        raise Thor::Error, "'ruby-graphviz' gem is required to generate a graph visualization"
-      end
-
-      graph_src = GraphViz.new 'Import', :type => :digraph
-      graph_dest = GraphViz.new 'Result', :type => :digraph
-    end
-=end
-
     tasklists = case options.format.to_sym
       when :json
         JSON.parse(File.read input)
       end
 
-    parents, orphans = prepare_tasklists!(tasklists)
+    tasklists, parents = prepare_import(tasklists)
 
     if options.pretend?
       client = nil
@@ -127,6 +101,8 @@ class App < Thor
       end
     end
 
+    id_mapping = {}
+
     total_tasks = 0
     tasklists.each do |tasklist|
       task_count = 0
@@ -138,34 +114,10 @@ class App < Thor
         new_tasklist = client.create_tasklist(tasklist)
       end
 
-=begin When you do it twice, you stop caring.
-      if options.graph?
-        graph_src.add_node(tasklist['id'])
-        graph_dest.add_node(new_tasklist['id'])
-      end
-=end
-
       debug "tasklist:create '#{new_tasklist['title']}' (#{new_tasklist['id']})"
 
       tasklist['tasks'].each do |task|
-        if orphans.include? task['id']
-          debug "skip: orphaned task #{task['title']} (#{task['id']})"
-          next
-        end
-
-        if task.has_key? 'parent'
-          if parents.fetch(task['parent'], :placeholder) == :placeholder
-            parent = tasklist['tasks'].find {|t| t['id'] == task['parent']}
-            tasks = [task, parent].map {|t| "#{t['id'].rjust(35)} #{t['position'].to_s.rjust(20)}" }.join("\n")
-            debug "skip: child called not yet initialized parent:\n#{tasks}"
-            next
-          end
-
-          debug "parent:rename #{task['parent']} #{parents[task['parent']]}"
-          task['parent'] = parents[task['parent']]
-        end
-
-        task['title'].strip!
+        task_id = task.delete 'id'
 
         if options.pretend?
           new_task = task.dup.update 'id' => "task-#{task_id_seq.next}"
@@ -173,14 +125,11 @@ class App < Thor
           new_task = client.create_task(task, new_tasklist['id'])
         end
 
-        debug "task:create '#{new_task['title']}' (#{new_task['id']}, #{task['id']})#{new_task['parent'] ? " [child of #{new_task['parent']}]" : ""}"
+        id_mapping[task_id] = { 'id' => new_task['id'], 'tasklist' => new_tasklist['id'] }
+
+        debug "task:create '#{new_task['title']}' (#{new_task['id']}, #{task_id})#{new_task['parent'] ? " [child of #{new_task['parent']}]" : ""}"
 
         task_count += 1
-
-        if parents.include? task['id']
-          debug "trying to set parent id #{task['id']} twice" if parents[task['id']] != :placeholder
-          parents[task['id']] = new_task['id']
-        end
       end
 
       total_tasks += task_count
@@ -190,6 +139,21 @@ class App < Thor
                blue(tasklist['title'], :bold),
                magenta(task_count, :bold),
                pluralize(task_count, "task"))
+    end
+
+    parents.each do |parent, children|
+      new_parent = id_mapping[parent]['id']
+
+      children.each do |id|
+        new_id = id_mapping[id]['id']
+        list_id = id_mapping[id]['tasklist']
+
+        unless options.pretend?
+          client.move_task new_id, list_id, :parent => new_parent
+        end
+
+        debug "task:move (#{id}, #{new_id}) tasklist (#{list_id}) children of (#{parent}, #{new_parent})"
+      end
     end
 
     say_status "import:#{options.format}",
@@ -300,30 +264,30 @@ to get one and bring it here to him!
     say_status "debug", msg, :white if options.debug?
   end
 
-  # Handle parent-child relationships
-  def prepare_tasklists!(tasklists)
+  # Handle parent-child relationships and ordering
+  def prepare_import(tasklists)
     parents = {}
-    orphans = []
-    tasklist_ids = tasklists.map {|list| list['id'] }
-    tasklists.each do |tasklist|
-      task_ids = tasklist['tasks'].map {|task| task['id'] }
-      tasklist['tasks'].each do |task|
-        next unless task.has_key? 'parent'
-        if not task_ids.include?(task['parent'])
-          if tasklist_ids.include?(task['parent'])
-            task.delete 'parent'
-          else
-            orphans << task['id']
-          end
-        else
-          parents[task['parent']] ||= :placeholder
+    tasklists = tasklists.map do |list|
+      list_data = GSquire.resource(list).data
+      list_data.delete 'id'
+      # can't order by task['position'] since it doesn't reflect the actual order
+      # and inserts without the 'previous' parameter puts tasks on top like a stack
+      # so we need to revert the original task array
+      tasks = list['tasks'].reverse
+      list_data['tasks'] = tasks.map do |task|
+        task_data = GSquire.resource(task).data
+        if task_data.include? 'parent'
+          parents[task_data['parent']] ||= []
+          parents[task_data['parent']] << task_data['id']
+          task_data.delete 'parent'
         end
+        # we don't clear the 'id' attribute to be able to use it with parents hash later
+        task_data
       end
-
-      tasklist['tasks'].sort_by! {|t| t.include?('parent') ? 1 : 0 }
+      list_data
     end
 
-    [parents, orphans]
+    [tasklists, parents]
   end
 
   def id_seq

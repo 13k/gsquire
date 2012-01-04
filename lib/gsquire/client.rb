@@ -1,5 +1,6 @@
 # encoding: utf-8
 
+require 'cgi'
 require 'json'
 require 'uri'
 
@@ -59,7 +60,7 @@ module GSquire
     end
 
     # Pulls a task of a tasklist
-    # @param [String] task_id Task ID
+    # @param [String] task_id Task id
     # @param [String] tasklist_id ('@default') Tasklist id
     # @return [Hash] Task hash
     def task(task_id, tasklist_id = '@default')
@@ -73,18 +74,36 @@ module GSquire
       post gtasks_tasks_url(tasklist_id), strip(:task, :create, task)
     end
 
+    # Moves a task inside the given tasklist
+    # @param [String] task_id Task id
+    # @param [String] tasklist_id ('@default') Tasklist id
+    # @option params [String] :parent Parent task id. Will move the task under the parent id
+    # @option params [String] :previous Previous task id. Will move the task to after the task with this id
+    def move_task(task_id, tasklist_id = '@default', params={})
+      return if params.empty?
+      post gtasks_task_move_url(task_id, tasklist_id, params)
+    end
+
     protected
 
     def get(url)
       _ oauth_token.get(url)
     end
 
-    def post(url, content)
-      _ oauth_token.post(url, body: content.to_json, headers: {'Content-Type' => 'application/json'})
+    def post(url, content={})
+      opts = {}
+      if not content.empty?
+        opts.merge!(body: content.to_json, headers: {'Content-Type' => 'application/json'})
+      end
+      _ oauth_token.post(url, opts)
     end
 
-    def put(url, content)
-      _ oauth_token.put(url, body: content.to_json, headers: {'Content-Type' => 'application/json'})
+    def put(url, content={})
+      opts = {}
+      if not content.empty?
+        opts.merge!(body: content.to_json, headers: {'Content-Type' => 'application/json'})
+      end
+      _ oauth_token.put(url, opts)
     end
 
     def delete(url)
@@ -107,6 +126,16 @@ module GSquire
       gtasks_urls(:task, tasklist_id, task_id)
     end
 
+    def gtasks_task_move_url(task_id, tasklist_id = '@default', params)
+      uri = gtasks_urls(:task_move, tasklist_id, task_id)
+      uri.query = params.collect { |k, v| "#{k.to_s}=#{CGI::escape(v.to_s)}" }.join('&')
+      uri
+    end
+
+    def gtasks_tasks_clear_url(tasklist_id = '@default')
+      gtasks_urls(:tasks_clear, tasklist_id)
+    end
+
     def gtasks_urls(resource, *params)
       segments = case resource
         when :tasklists
@@ -117,6 +146,10 @@ module GSquire
           "/lists/$/tasks"
         when :task
           "/lists/$/tasks/$"
+        when :task_move
+          "/lists/$/tasks/$/move"
+        when :tasks_clear
+          "/lists/$/clear"
       end.split('/')
       subpath = segments.map {|seg| seg == '$' ? params.shift : seg }.join('/')
       GOOGLE_TASKS_API.merge(GOOGLE_TASKS_API.path + subpath)

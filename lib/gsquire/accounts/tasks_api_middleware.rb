@@ -1,6 +1,6 @@
 # encoding: utf-8
 
-require 'hashie'
+require 'gsquire/models'
 
 module GSquire
   class Accounts
@@ -23,7 +23,7 @@ module GSquire
       end
 
       def mash(hash)
-        Hashie::Mash.new hash
+        GSquire.resource hash
       end
 
       def content_type(env)
