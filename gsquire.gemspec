@@ -30,7 +30,7 @@ Gem::Specification.new do |s|
   s.add_dependency 'hashie', '~> 1.1.0'
 
   s.add_development_dependency 'rdoc'
-  s.add_development_dependency 'rdiscount'
+  s.add_development_dependency 'redcarpet'
   s.add_development_dependency 'yard'
   s.add_development_dependency 'awesome_print'
 
